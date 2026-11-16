@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dashboard | Department Budget System</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+    <aside id="sidebar" class="sidebar"></aside>
+
+    <div class="content">
+        <div class="topbar"><span>STAFF</span><span>HOME / DASHBOARD</span></div>
+
+        <main class="page">
+            <div class="page-header">
+                <h1>Dashboard</h1>
+                <div class="header-actions">
+                    <label for="year-select" class="muted small">Academic year</label>
+                    <select id="year-select"></select>
+                </div>
+            </div>
+
+            <div id="page-message"></div>
+
+            <div id="empty-state" class="card hidden">
+                <h2>No budget yet</h2>
+                <p>Create this year's budget proposal to start tracking spending.</p>
+                <a class="btn-primary" href="proposal.html" style="text-decoration:none">Create a proposal</a>
+            </div>
+
+            <div id="dashboard-body" class="hidden">
+                <div id="draft-note"></div>
+
+                <div class="summary">
+                    <div class="summary-box"><div class="label">Total budget</div><div class="value" id="total-budget">-</div></div>
+                    <div class="summary-box"><div class="label">Spent</div><div class="value" id="total-spent">-</div></div>
+                    <div class="summary-box"><div class="label">Remaining</div><div class="value" id="total-remaining">-</div></div>
+                    <div class="summary-box"><div class="label">Used</div><div class="value" id="total-used">-</div></div>
+                </div>
+
+                <h2>Categories</h2>
+                <p class="muted small">Green under 75% used, amber from 75%, red above 90%. Click a category to see its report.</p>
+                <div id="cards" class="category-grid"></div>
+
+                <div id="lapse-panel" class="card lapse-card"></div>
+            </div>
+        </main>
+
+        <footer class="footer">Department Budget Management System</footer>
+    </div>
+</div>
+
+<script src="script.js"></script>
+<script>
+    requireLogin();
+    renderSidebar('dashboard');
+
+    let currentYear = null;   // the dashboard data of the selected year
+
+    async function init() {
+        try {
+            const years = await api('/budget-years');
+            if (years.length === 0) {
+                document.getElementById('empty-state').classList.remove('hidden');
+                document.getElementById('year-select').classList.add('hidden');
+                return;
+            }
+            const select = document.getElementById('year-select');
+            select.innerHTML = years.map(y =>
+                `<option value="${y.budgetYearId}">${escapeHtml(y.academicYear)} (${y.status === 'FIXED' ? 'Fixed' : 'Draft'})</option>`
+            ).join('');
+            // Show the newest fixed year first, if there is one
+            const fixed = years.find(y => y.status === 'FIXED');
+            select.value = (fixed || years[0]).budgetYearId;
+            select.addEventListener('change', loadDashboard);
+            document.getElementById('dashboard-body').classList.remove('hidden');
+            await loadDashboard();
+        } catch (err) {
+            showMessage('page-message', err.message, 'error');
+        }
+    }
+
+    async function loadDashboard() {
+        clearMessage('page-message');
+        const id = document.getElementById('year-select').value;
+        try {
+            const d = await api('/dashboard?budgetYearId=' + id);
+            currentYear = d;
+
+            document.getElementById('total-budget').textContent = formatRupees(d.totalBudget);
+            document.getElementById('total-spent').textContent = formatRupees(d.totalSpent);
+            document.getElementById('total-remaining').textContent = formatRupees(d.totalRemaining);
+            document.getElementById('total-used').textContent = d.utilisation + '%';
+
+            if (d.status === 'DRAFT') {
+                document.getElementById('draft-note').innerHTML =
+                    '<div class="alert alert-info">The ' + escapeHtml(d.academicYear) + ' proposal is still a draft. ' +
+                    'Fix it on the <a href="proposal.html">Budget Proposal</a> page after the Principal approves it, ' +
+                    'then expenses can be entered.</div>';
+            } else {
+                document.getElementById('draft-note').innerHTML = '';
+            }
+
+            renderCards(d.allocations);
+
+            if (d.status === 'FIXED') {
+                const unused = await api('/unused-funds?budgetYearId=' + id);
+                renderLapsePanel(unused);
+            } else {
+                document.getElementById('lapse-panel').classList.add('hidden');
+            }
+        } catch (err) {
+            showMessage('page-message', err.message, 'error');
+        }
+    }
+
+    function renderCards(allocations) {
+        document.getElementById('cards').innerHTML = allocations.map(a => {
+            const colour = a.health.toLowerCase();
+            const width = Math.min(a.utilisation, 100);
+            return `
+                <button class="cat-card" onclick="openCategoryReport(${a.categoryId})">
+                    <div class="cat-head">
+                        <span class="cat-code">${escapeHtml(a.code)}</span>
+                        <span class="cat-name">${escapeHtml(a.name)}</span>
+                        <span class="pill pill-${colour}">${a.utilisation}%</span>
+                    </div>
+                    <div class="gauge"><div class="gauge-fill fill-${colour}" style="width:${width}%"></div></div>
+                    <div class="cat-figures">
+                        <span>Spent <strong>${formatRupees(a.spent)}</strong></span>
+                        <span class="muted">of ${formatRupees(a.amount)}</span>
+                    </div>
+                    <div class="small">Remaining: <strong>${formatRupees(a.remaining)}</strong></div>
+                </button>`;
+        }).join('');
+    }
+
+    function renderLapsePanel(u) {
+        const panel = document.getElementById('lapse-panel');
+        panel.classList.remove('hidden');
+        panel.classList.toggle('quiet', !u.lastQuarter);
+
+        let html = '';
+        if (u.lastQuarter) {
+            html += '<h2>Funds likely to lapse</h2>';
+            html += '<p class="small">These categories have used less than half their budget and the year ends on 31 March. ' +
+                    'Move funds where they are needed on the <a href="proposal.html">Budget Proposal</a> page.</p>';
+        } else {
+            html += '<h2>Low use so far</h2>';
+            html += '<p class="muted small">Categories under 50% used. From January this becomes a year-end alert.</p>';
+        }
+
+        if (u.unused.length === 0) {
+            html += '<p class="muted">Every category has used at least half of its budget.</p>';
+        } else {
+            html += '<ul class="panel-list">' + u.unused.map(a =>
+                `<li><span><strong>${escapeHtml(a.code)}</strong> ${escapeHtml(a.name)} (${a.utilisation}% used)</span>
+                     <span>${formatRupees(a.remaining)} unused</span></li>`
+            ).join('') + '</ul>';
+        }
+
+        if (u.runningLow.length > 0) {
+            html += '<p class="small" style="margin-top:12px">Running low: ' + u.runningLow.map(a =>
+                `<strong>${escapeHtml(a.code)}</strong> ${escapeHtml(a.name)} (${formatRupees(a.remaining)} left)`
+            ).join(', ') + '</p>';
+        }
+        panel.innerHTML = html;
+    }
+
+    // Opens the category report for this year, up to today
+    function openCategoryReport(categoryId) {
+        const today = todayIso();
+        const to = currentYear.endDate < today ? currentYear.endDate : today;
+        const from = currentYear.startDate;
+        if (from > today) {
+            showMessage('page-message', 'This academic year has not started yet, so there is nothing to report.', 'info');
+            return;
+        }
+        window.location = `reports.html?categoryId=${categoryId}&from=${from}&to=${to}`;
+    }
+
+    init();
+</script>
+</body>
+</html>

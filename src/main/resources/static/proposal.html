@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Budget Proposal | Department Budget System</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+    <aside id="sidebar" class="sidebar"></aside>
+
+    <div class="content">
+        <div class="topbar"><span>STAFF</span><span>HOME / BUDGET PROPOSAL</span></div>
+
+        <main class="page">
+            <div class="page-header">
+                <h1>Budget Proposal</h1>
+                <div class="header-actions">
+                    <select id="year-select" class="hidden"></select>
+                    <button class="btn-primary" onclick="toggleNewForm(true)">+ New Proposal</button>
+                </div>
+            </div>
+
+            <div id="page-message"></div>
+
+            <!-- New proposal form -->
+            <div id="new-form" class="card hidden">
+                <h2>New proposal</h2>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="new-year">Academic year</label>
+                        <input id="new-year" type="text" placeholder="e.g. 2026-27" maxlength="7">
+                        <span class="error" id="new-year-error"></span>
+                    </div>
+                </div>
+                <p class="muted small">All 7 categories start at ₹0. Enter the estimated amounts next.</p>
+                <div class="form-actions">
+                    <button class="btn-primary" onclick="createProposal()">Create proposal</button>
+                    <button class="btn-secondary" onclick="toggleNewForm(false)">Cancel</button>
+                </div>
+            </div>
+
+            <div id="no-proposal" class="card hidden">
+                <h2>No proposals yet</h2>
+                <p>Click <strong>+ New Proposal</strong> to prepare this year's budget estimate.</p>
+            </div>
+
+            <!-- The selected proposal -->
+            <div id="proposal-body" class="hidden">
+                <div class="card">
+                    <div class="page-header" style="margin-bottom:12px">
+                        <h2 id="proposal-title" style="margin:0"></h2>
+                        <div class="header-actions">
+                            <button class="btn-secondary" onclick="download('excel')">Download Excel</button>
+                            <button class="btn-secondary" onclick="download('pdf')">Download PDF</button>
+                        </div>
+                    </div>
+                    <p id="proposal-note" class="small muted"></p>
+
+                    <div class="table-wrap">
+                        <table>
+                            <thead id="proposal-head"></thead>
+                            <tbody id="proposal-rows"></tbody>
+                        </table>
+                    </div>
+
+                    <div id="draft-actions" class="form-actions">
+                        <button class="btn-secondary" onclick="saveProposal(true)">Save draft</button>
+                        <button class="btn-primary" onclick="fixProposal()">Fix proposal</button>
+                    </div>
+                </div>
+
+                <!-- Only after fixing: move money between categories -->
+                <div id="move-card" class="card hidden">
+                    <h2>Move funds between categories</h2>
+                    <p class="muted small">Use this after the Principal agrees to a change. Every move is recorded below.</p>
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="move-from">From</label>
+                            <select id="move-from"></select>
+                            <span class="error" id="move-from-error"></span>
+                        </div>
+                        <div class="field">
+                            <label for="move-to">To</label>
+                            <select id="move-to"></select>
+                            <span class="error" id="move-to-error"></span>
+                        </div>
+                        <div class="field">
+                            <label for="move-amount">Amount (₹)</label>
+                            <input id="move-amount" type="text" placeholder="e.g. 20000">
+                            <span class="error" id="move-amount-error"></span>
+                        </div>
+                        <div class="field wide">
+                            <label for="move-reason">Reason</label>
+                            <input id="move-reason" type="text" maxlength="200" placeholder="e.g. Approved by Principal on 12 Jan for software renewal">
+                            <span class="error" id="move-reason-error"></span>
+                        </div>
+                    </div>
+                    <span class="error" id="move-form-error"></span>
+                    <div class="form-actions">
+                        <button class="btn-primary" onclick="moveFunds()">Move funds</button>
+                    </div>
+
+                    <h3 style="margin-top:22px">Change history</h3>
+                    <div class="table-wrap">
+                        <table>
+                            <thead><tr><th>Date</th><th>Category</th><th class="amount">Old amount</th><th class="amount">New amount</th><th>Reason</th></tr></thead>
+                            <tbody id="history-rows"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <footer class="footer">Department Budget Management System</footer>
+    </div>
+</div>
+
+<script src="script.js"></script>
+<script>
+    requireLogin();
+    renderSidebar('proposal');
+
+    let current = null;   // the selected budget year with its 7 allocations
+
+    // ---------- Loading ----------
+
+    async function loadYears(selectId) {
+        try {
+            const years = await api('/budget-years');
+            const select = document.getElementById('year-select');
+            if (years.length === 0) {
+                document.getElementById('no-proposal').classList.remove('hidden');
+                document.getElementById('proposal-body').classList.add('hidden');
+                select.classList.add('hidden');
+                return;
+            }
+            document.getElementById('no-proposal').classList.add('hidden');
+            select.classList.remove('hidden');
+            select.innerHTML = years.map(y =>
+                `<option value="${y.budgetYearId}">${escapeHtml(y.academicYear)} (${y.status === 'FIXED' ? 'Fixed' : 'Draft'})</option>`
+            ).join('');
+            select.value = selectId || years[0].budgetYearId;
+            await loadProposal();
+        } catch (err) {
+            showMessage('page-message', err.message, 'error');
+        }
+    }
+
+    async function loadProposal() {
+        const id = document.getElementById('year-select').value;
+        current = await api('/budget-years/' + id);
+        renderProposal();
+        if (current.status === 'FIXED') {
+            fillMoveForm();
+            await loadHistory();
+        }
+    }
+
+    // ---------- Showing the proposal ----------
+
+    function renderProposal() {
+        const fixed = current.status === 'FIXED';
+        document.getElementById('proposal-body').classList.remove('hidden');
+        document.getElementById('proposal-title').innerHTML =
+            'Budget ' + escapeHtml(current.academicYear) + ' ' +
+            (fixed ? '<span class="badge badge-fixed">Fixed</span>' : '<span class="badge badge-draft">Draft</span>');
+        document.getElementById('proposal-note').textContent = fixed
+            ? 'Fixed on ' + formatDate(current.fixedOn) + '. The amounts are locked; use "Move funds" below for approved changes.'
+            : 'Enter the estimated amount for each category and save. After the Principal approves it, click "Fix proposal".';
+
+        document.getElementById('draft-actions').classList.toggle('hidden', fixed);
+        document.getElementById('move-card').classList.toggle('hidden', !fixed);
+
+        document.getElementById('proposal-head').innerHTML = fixed
+            ? '<tr><th>Code</th><th>Category</th><th class="amount">Allocated</th><th class="amount">Spent</th><th class="amount">Remaining</th></tr>'
+            : '<tr><th>Code</th><th>Category</th><th class="amount">Estimated amount (₹)</th></tr>';
+
+        let rows = current.allocations.map(a => {
+            if (fixed) {
+                return `<tr><td>${escapeHtml(a.code)}</td><td>${escapeHtml(a.name)}</td>
+                        <td class="amount">${formatRupees(a.amount)}</td>
+                        <td class="amount">${formatRupees(a.spent)}</td>
+                        <td class="amount">${formatRupees(a.remaining)}</td></tr>`;
+            }
+            return `<tr><td>${escapeHtml(a.code)}</td><td>${escapeHtml(a.name)}</td>
+                    <td class="amount">
+                        <input class="amount-input" id="amt-${a.categoryId}" type="text" inputmode="decimal"
+                               value="${Number(a.amount)}" oninput="updateTotal()">
+                        <span class="error" id="amt-${a.categoryId}-error"></span>
+                    </td></tr>`;
+        }).join('');
+
+        rows += fixed
+            ? `<tr class="total-row"><td></td><td>Total</td><td class="amount">${formatRupees(current.totalBudget)}</td>
+               <td class="amount">${formatRupees(current.totalSpent)}</td>
+               <td class="amount">${formatRupees(current.totalBudget - current.totalSpent)}</td></tr>`
+            : `<tr class="total-row"><td></td><td>Total</td><td class="amount" id="proposal-total">${formatRupees(current.totalBudget)}</td></tr>`;
+
+        document.getElementById('proposal-rows').innerHTML = rows;
+    }
+
+    // Live total while typing (only counts valid amounts)
+    function updateTotal() {
+        let total = 0;
+        for (const a of current.allocations) {
+            const v = document.getElementById('amt-' + a.categoryId).value.trim();
+            if (isAmount(v)) total += Number(v);
+        }
+        document.getElementById('proposal-total').textContent = formatRupees(total);
+    }
+
+    // ---------- New proposal ----------
+
+    function toggleNewForm(show) {
+        clearErrors();
+        document.getElementById('new-form').classList.toggle('hidden', !show);
+        if (show) {
+            const input = document.getElementById('new-year');
+            input.value = currentAcademicYear().label;
+            input.focus();
+        }
+    }
+
+    async function createProposal() {
+        clearErrors();
+        const year = document.getElementById('new-year').value.trim();
+        if (!isAcademicYear(year)) {
+            showError('new-year', 'Use the form 2026-27, where the second year follows the first');
+            return;
+        }
+        try {
+            const created = await api('/budget-years', { method: 'POST', body: JSON.stringify({ academicYear: year }) });
+            toggleNewForm(false);
+            await loadYears(created.budgetYearId);
+            showMessage('page-message', 'Proposal ' + year + ' created. Enter the amounts and save.', 'success');
+        } catch (err) {
+            showError('new-year', err.message);
+        }
+    }
+
+    // ---------- Save and fix ----------
+
+    // Returns true if saved
+    async function saveProposal(showSaved) {
+        clearErrors();
+        clearMessage('page-message');
+        const amounts = {};
+        let ok = true;
+        for (const a of current.allocations) {
+            const field = 'amt-' + a.categoryId;
+            const v = document.getElementById(field).value.trim();
+            if (v === '') { showError(field, 'Required'); ok = false; }
+            else if (!isAmount(v)) { showError(field, 'Numbers only, up to 2 decimals'); ok = false; }
+            else if (Number(v) > 100000000) { showError(field, 'Too large, please check'); ok = false; }
+            amounts[a.categoryId] = v;
+        }
+        if (!ok) return false;
+
+        const zero = current.allocations.filter(a => Number(amounts[a.categoryId]) === 0).map(a => a.code);
+        if (zero.length > 0 && !confirm('Category ' + zero.join(', ') + ' has ₹0. Save anyway?')) {
+            return false;
+        }
+
+        try {
+            current = await api(`/budget-years/${current.budgetYearId}/allocations`, {
+                method: 'PUT', body: JSON.stringify(amounts)
+            });
+            renderProposal();
+            if (showSaved) showMessage('page-message', 'Draft saved.', 'success');
+            return true;
+        } catch (err) {
+            showMessage('page-message', err.message, 'error');
+            return false;
+        }
+    }
+
+    async function fixProposal() {
+        const sure = confirm('Fix the ' + current.academicYear + ' proposal?\n\n' +
+            'Do this only after the Principal has approved it. The amounts cannot be edited afterwards.');
+        if (!sure) return;
+        const saved = await saveProposal(false);
+        if (!saved) return;
+        try {
+            await api(`/budget-years/${current.budgetYearId}/fix`, { method: 'POST' });
+            await loadYears(current.budgetYearId);
+            showMessage('page-message', 'Proposal fixed. Expenses can now be entered for ' + current.academicYear + '.', 'success');
+        } catch (err) {
+            showMessage('page-message', err.message, 'error');
+        }
+    }
+
+    async function download(format) {
+        try {
+            const ext = format === 'pdf' ? 'pdf' : 'xlsx';
+            await downloadFile(`/budget-years/${current.budgetYearId}/export?format=${format}`,
+                'Budget_Proposal_' + current.academicYear + '.' + ext);
+        } catch (err) {
+            showMessage('page-message', err.message, 'error');
+        }
+    }
+
+    // ---------- Move funds ----------
+
+    function fillMoveForm() {
+        const options = current.allocations.map(a =>
+            `<option value="${a.allocationId}">${escapeHtml(a.code)}: ${escapeHtml(a.name)} (${formatRupees(a.remaining)} unused)</option>`
+        ).join('');
+        document.getElementById('move-from').innerHTML = '<option value="">Choose category</option>' + options;
+        document.getElementById('move-to').innerHTML = '<option value="">Choose category</option>' + options;
+        document.getElementById('move-amount').value = '';
+        document.getElementById('move-reason').value = '';
+    }
+
+    async function moveFunds() {
+        clearErrors();
+        const from = document.getElementById('move-from').value;
+        const to = document.getElementById('move-to').value;
+        const amount = document.getElementById('move-amount').value.trim();
+        const reason = document.getElementById('move-reason').value.trim();
+
+        let ok = true;
+        if (!from) { showError('move-from', 'Choose where the money comes from'); ok = false; }
+        if (!to) { showError('move-to', 'Choose where the money goes'); ok = false; }
+        if (from && to && from === to) { showError('move-to', 'Choose a different category'); ok = false; }
+        if (!isPositiveAmount(amount)) { showError('move-amount', 'Enter a positive number, up to 2 decimals'); ok = false; }
+        if (!isMeaningfulText(reason)) { showError('move-reason', 'Write a reason for the change'); ok = false; }
+        if (!ok) return;
+
+        try {
+            await api('/allocations/move', {
+                method: 'POST',
+                body: JSON.stringify({ fromAllocationId: from, toAllocationId: to, amount: amount, reason: reason })
+            });
+            await loadProposal();
+            showMessage('page-message', 'Moved ' + formatRupees(amount) + '.', 'success');
+        } catch (err) {
+            showError('move-form', err.message);
+        }
+    }
+
+    async function loadHistory() {
+        const list = await api(`/budget-years/${current.budgetYearId}/history`);
+        const body = document.getElementById('history-rows');
+        if (list.length === 0) {
+            body.innerHTML = '<tr><td colspan="5" class="muted">No changes since the proposal was fixed.</td></tr>';
+            return;
+        }
+        body.innerHTML = list.map(h =>
+            `<tr><td>${formatDate(h.changedAt)}</td><td>${escapeHtml(h.code)}: ${escapeHtml(h.name)}</td>
+             <td class="amount">${formatRupees(h.oldAmount)}</td><td class="amount">${formatRupees(h.newAmount)}</td>
+             <td>${escapeHtml(h.reason)}</td></tr>`
+        ).join('');
+    }
+
+    document.getElementById('year-select').addEventListener('change', () => {
+        clearMessage('page-message');
+        loadProposal().catch(err => showMessage('page-message', err.message, 'error'));
+    });
+
+    loadYears();
+</script>
+</body>
+</html>

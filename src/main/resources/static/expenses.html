@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Expenses | Department Budget System</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+    <aside id="sidebar" class="sidebar"></aside>
+
+    <div class="content">
+        <div class="topbar"><span>STAFF</span><span>HOME / EXPENSES</span></div>
+
+        <main class="page">
+            <div class="page-header">
+                <h1>Expenses</h1>
+                <div class="header-actions">
+                    <select id="year-select" class="hidden"></select>
+                    <button class="btn-primary hidden" id="add-btn" onclick="openForm(null)">+ Add Expense</button>
+                </div>
+            </div>
+
+            <div id="page-message"></div>
+
+            <div id="no-fixed" class="card hidden">
+                <h2>No fixed budget yet</h2>
+                <p>Expenses are recorded against a fixed budget. Fix this year's proposal on the
+                   <a href="proposal.html">Budget Proposal</a> page first.</p>
+            </div>
+
+            <!-- Add / edit form -->
+            <div id="expense-form" class="card hidden">
+                <h2 id="form-title">Add expense</h2>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="date">Bill date</label>
+                        <input id="date" type="date">
+                        <span class="error" id="date-error"></span>
+                    </div>
+                    <div class="field">
+                        <label for="type">Expense type</label>
+                        <select id="type"></select>
+                        <span class="error" id="type-error"></span>
+                    </div>
+                    <div class="field">
+                        <label for="amount">Amount (₹)</label>
+                        <input id="amount" type="text" inputmode="decimal" placeholder="e.g. 2500.00">
+                        <span class="error" id="amount-error"></span>
+                    </div>
+
+                    <div class="field wide">
+                        <div id="suggestion-panel" class="suggestions"></div>
+                    </div>
+
+                    <div class="field">
+                        <label for="category">Category</label>
+                        <select id="category"></select>
+                        <span class="error" id="category-error"></span>
+                    </div>
+                    <div class="field">
+                        <label for="kind">Recurring?</label>
+                        <select id="kind">
+                            <option value="NON_RECURRING">Non-recurring (one-time)</option>
+                            <option value="RECURRING">Recurring (repeats)</option>
+                        </select>
+                    </div>
+                    <div class="field" id="frequency-field">
+                        <label for="frequency">Repeats</label>
+                        <select id="frequency">
+                            <option value="">Choose how often</option>
+                            <option value="MONTHLY">Monthly</option>
+                            <option value="QUARTERLY">Quarterly</option>
+                            <option value="HALF_YEARLY">Half-yearly</option>
+                            <option value="YEARLY">Yearly</option>
+                        </select>
+                        <span class="error" id="frequency-error"></span>
+                    </div>
+
+                    <div class="field wide">
+                        <label for="description">Description</label>
+                        <input id="description" type="text" maxlength="255" placeholder="e.g. MATLAB campus licence renewal">
+                        <span class="error" id="description-error"></span>
+                    </div>
+                    <div class="field">
+                        <label for="receipt">Receipt number</label>
+                        <input id="receipt" type="text" maxlength="50" placeholder="e.g. INV-2041">
+                        <span class="error" id="receipt-error"></span>
+                    </div>
+                    <div class="field">
+                        <label for="file">Receipt file (PDF, JPG or PNG, up to 5 MB)</label>
+                        <input id="file" type="file" accept=".pdf,.jpg,.jpeg,.png">
+                        <span class="error" id="file-error"></span>
+                        <span class="muted small" id="file-note"></span>
+                    </div>
+                </div>
+
+                <span class="error" id="form-error"></span>
+                <div class="form-actions">
+                    <button class="btn-primary" id="save-btn" onclick="saveExpense()">Save expense</button>
+                    <button class="btn-secondary" onclick="closeForm()">Cancel</button>
+                </div>
+            </div>
+
+            <!-- Expense list -->
+            <div id="expense-list" class="hidden">
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr><th>Date</th><th>Category</th><th>Type</th><th>Description</th>
+                                <th>Receipt no.</th><th class="amount">Amount</th><th>Recurring</th><th>File</th><th>Action</th></tr>
+                        </thead>
+                        <tbody id="expense-rows"></tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+
+        <footer class="footer">Department Budget Management System</footer>
+    </div>
+</div>
+
+<script src="script.js"></script>
+<script>
+    requireLogin();
+    renderSidebar('expenses');
+
+    let year = null;            // the selected fixed budget year with its allocations
+    let types = [];             // expense types with their allowed category ids
+    let expenses = [];          // expenses of the selected year
+    let editing = null;         // the expense being edited, or null when adding
+    let confirmedDuplicate = false;
+    let suggestTimer = null;
+
+    // ---------- Loading ----------
+
+    async function init() {
+        try {
+            const years = (await api('/budget-years')).filter(y => y.status === 'FIXED');
+            if (years.length === 0) {
+                document.getElementById('no-fixed').classList.remove('hidden');
+                return;
+            }
+            const select = document.getElementById('year-select');
+            select.innerHTML = years.map(y => `<option value="${y.budgetYearId}">${escapeHtml(y.academicYear)}</option>`).join('');
+            select.classList.remove('hidden');
+            select.addEventListener('change', () => { closeForm(); loadYear(); });
+            document.getElementById('add-btn').classList.remove('hidden');
+            document.getElementById('expense-list').classList.remove('hidden');
+
+            types = await api('/expense-types');
+            document.getElementById('type').innerHTML = '<option value="">Choose expense type</option>' +
+                types.map(t => `<option value="${t.typeId}">${escapeHtml(t.name)}</option>`).join('');
+
+            await loadYear();
+        } catch (err) {
+            showMessage('page-message', err.message, 'error');
+        }
+    }
+
+    async function loadYear() {
+        const id = document.getElementById('year-select').value;
+        try {
+            year = await api('/budget-years/' + id);
+            expenses = await api('/expenses?budgetYearId=' + id);
+            renderTable();
+        } catch (err) {
+            showMessage('page-message', err.message, 'error');
+        }
+    }
+
+    function renderTable() {
+        const body = document.getElementById('expense-rows');
+        if (expenses.length === 0) {
+            body.innerHTML = '<tr><td colspan="9" class="muted">No expenses yet for ' + escapeHtml(year.academicYear) +
+                '. Click "+ Add Expense" to record the first bill.</td></tr>';
+            return;
+        }
+        let total = 0;
+        let html = expenses.map(e => {
+            total += Number(e.amount);
+            const recurring = e.recurring ? 'Yes, ' + formatFrequency(e.frequency).toLowerCase() : 'No';
+            const file = e.hasReceiptFile
+                ? `<a href="/api/expenses/${e.expenseId}/receipt" target="_blank">View</a>`
+                : '<span class="muted">None</span>';
+            return `<tr>
+                <td class="nowrap">${formatDate(e.expenseDate)}</td>
+                <td>${escapeHtml(e.categoryCode)}: ${escapeHtml(e.categoryName)}</td>
+                <td>${escapeHtml(e.typeName)}</td>
+                <td>${escapeHtml(e.description)}</td>
+                <td class="nowrap">${escapeHtml(e.receiptNumber)}</td>
+                <td class="amount">${formatRupees(e.amount)}</td>
+                <td>${recurring}</td>
+                <td>${file}</td>
+                <td><button class="btn-small" onclick="openForm(${e.expenseId})">Edit</button></td>
+            </tr>`;
+        }).join('');
+        html += `<tr class="total-row"><td colspan="5">Total (${expenses.length} expenses)</td>
+                 <td class="amount">${formatRupees(total)}</td><td colspan="3"></td></tr>`;
+        body.innerHTML = html;
+    }
+
+    // ---------- The form ----------
+
+    function openForm(expenseId) {
+        clearErrors();
+        clearMessage('page-message');
+        confirmedDuplicate = false;
+        editing = expenseId ? expenses.find(e => e.expenseId === expenseId) : null;
+
+        document.getElementById('form-title').textContent = editing ? 'Edit expense' : 'Add expense';
+        document.getElementById('save-btn').textContent = editing ? 'Save changes' : 'Save expense';
+
+        // Dates allowed: inside the academic year and not in the future
+        const dateInput = document.getElementById('date');
+        dateInput.min = year.startDate;
+        dateInput.max = year.endDate < todayIso() ? year.endDate : todayIso();
+
+        dateInput.value = editing ? editing.expenseDate : dateInput.max;
+        document.getElementById('type').value = editing ? editing.typeId : '';
+        document.getElementById('amount').value = editing ? Number(editing.amount) : '';
+        document.getElementById('kind').value = editing && editing.recurring ? 'RECURRING' : 'NON_RECURRING';
+        document.getElementById('frequency').value = editing && editing.frequency ? editing.frequency : '';
+        document.getElementById('description').value = editing ? editing.description : '';
+        document.getElementById('receipt').value = editing ? editing.receiptNumber : '';
+        document.getElementById('file').value = '';
+        document.getElementById('file-note').textContent =
+            editing && editing.hasReceiptFile ? 'A file is already attached. Choose a new one only to replace it.' : '';
+
+        updateCategoryOptions(editing ? editing.allocationId : null);
+        toggleFrequency();
+        refreshSuggestions();
+
+        const form = document.getElementById('expense-form');
+        form.classList.remove('hidden');
+        form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function closeForm() {
+        document.getElementById('expense-form').classList.add('hidden');
+        editing = null;
+    }
+
+    function toggleFrequency() {
+        const recurring = document.getElementById('kind').value === 'RECURRING';
+        document.getElementById('frequency-field').classList.toggle('hidden', !recurring);
+    }
+
+    // Only the categories this expense type is allowed under
+    function updateCategoryOptions(selectedAllocationId) {
+        const select = document.getElementById('category');
+        const type = types.find(t => String(t.typeId) === document.getElementById('type').value);
+        if (!type) {
+            select.innerHTML = '<option value="">Choose the expense type first</option>';
+            return;
+        }
+        const allowed = year.allocations.filter(a => type.categoryIds.includes(a.categoryId));
+        select.innerHTML = '<option value="">Choose category</option>' + allowed.map(a =>
+            `<option value="${a.allocationId}">${escapeHtml(a.code)}: ${escapeHtml(a.name)} (${formatRupees(availableIn(a))} left)</option>`
+        ).join('');
+        if (selectedAllocationId) select.value = selectedAllocationId;
+    }
+
+    // When editing, the expense's own amount is still free to use in its own category
+    function availableIn(allocation) {
+        let left = Number(allocation.remaining);
+        if (editing && editing.allocationId === allocation.allocationId) {
+            left += Number(editing.amount);
+        }
+        return left;
+    }
+
+    // ---------- Category suggestion panel ----------
+
+    function scheduleSuggestions() {
+        clearTimeout(suggestTimer);
+        suggestTimer = setTimeout(refreshSuggestions, 300);
+    }
+
+    async function refreshSuggestions() {
+        const panel = document.getElementById('suggestion-panel');
+        const typeId = document.getElementById('type').value;
+        const amount = document.getElementById('amount').value.trim();
+
+        if (!typeId || !isPositiveAmount(amount)) {
+            panel.innerHTML = '<span class="muted small">Choose the expense type and enter the amount to see which categories can take this bill.</span>';
+            return;
+        }
+        try {
+            const items = await api(`/suggestions?budgetYearId=${year.budgetYearId}&typeId=${typeId}&amount=${encodeURIComponent(amount)}`);
+
+            // Adjust for editing, then pick the recommended one: enough money, most left
+            items.forEach(s => {
+                s.left = Number(s.remaining);
+                if (editing && editing.allocationId === s.allocationId) s.left += Number(editing.amount);
+                s.fits = s.left >= Number(amount);
+            });
+            items.sort((x, y) => y.left - x.left);
+            const best = items.find(s => s.fits);
+
+            if (items.length === 0) {
+                panel.innerHTML = '<span class="muted small">No category accepts this expense type.</span>';
+                return;
+            }
+
+            let html = `<div class="suggest-title">Where ${formatRupees(amount)} can go</div>`;
+            html += items.map(s => {
+                const tag = s === best ? '<span class="tag-best">✓ Recommended</span>'
+                          : s.fits ? '<span class="tag-ok">✓ Enough</span>'
+                          : '<span class="tag-no">✗ Not enough</span>';
+                const use = s.fits ? `<button class="btn-small" onclick="useCategory(${s.allocationId})">Use</button>` : '<span></span>';
+                return `<div class="suggest-row ${s.fits ? '' : 'no'}">
+                            <span>${escapeHtml(s.code)}: ${escapeHtml(s.name)}</span>
+                            <span>${formatRupees(s.left)} left</span>${tag}${use}
+                        </div>`;
+            }).join('');
+            if (!best) {
+                html += '<p class="small" style="margin:8px 0 0">No category has enough money left for this bill. ' +
+                        'Move funds on the <a href="proposal.html">Budget Proposal</a> page first.</p>';
+            }
+            panel.innerHTML = html;
+
+            // If no category is chosen yet, pick the recommended one
+            const select = document.getElementById('category');
+            if (!select.value && best) select.value = best.allocationId;
+        } catch (err) {
+            panel.innerHTML = `<span class="error">${escapeHtml(err.message)}</span>`;
+        }
+    }
+
+    function useCategory(allocationId) {
+        document.getElementById('category').value = allocationId;
+    }
+
+    // ---------- Saving ----------
+
+    async function saveExpense() {
+        clearErrors();
+        const date = document.getElementById('date').value;
+        const typeId = document.getElementById('type').value;
+        const amount = document.getElementById('amount').value.trim();
+        const allocationId = document.getElementById('category').value;
+        const recurring = document.getElementById('kind').value === 'RECURRING';
+        const frequency = document.getElementById('frequency').value;
+        const description = document.getElementById('description').value.trim();
+        const receipt = document.getElementById('receipt').value.trim();
+        const file = document.getElementById('file').files[0];
+
+        // Check everything on the page first, so the staff sees all problems at once
+        let ok = true;
+        if (!date) { showError('date', 'Choose the bill date'); ok = false; }
+        else if (isFutureDate(date)) { showError('date', 'The date cannot be in the future'); ok = false; }
+        else if (date < year.startDate || date > year.endDate) {
+            showError('date', 'The date must be within ' + formatDate(year.startDate) + ' and ' + formatDate(year.endDate));
+            ok = false;
+        }
+        if (!typeId) { showError('type', 'Choose the expense type'); ok = false; }
+        if (amount === '') { showError('amount', 'Enter the amount'); ok = false; }
+        else if (!isAmount(amount)) { showError('amount', 'Numbers only, like 2500 or 2500.50 (no letters or minus sign)'); ok = false; }
+        else if (Number(amount) <= 0) { showError('amount', 'The amount must be more than zero'); ok = false; }
+        if (!allocationId) { showError('category', 'Choose a category'); ok = false; }
+        if (recurring && !frequency) { showError('frequency', 'Choose how often it repeats'); ok = false; }
+        if (!description) { showError('description', 'Enter a description'); ok = false; }
+        else if (!isMeaningfulText(description)) { showError('description', 'Use words, not only numbers or symbols'); ok = false; }
+        if (!receipt) { showError('receipt', 'Enter the receipt number'); ok = false; }
+        else if (!isValidReceiptNo(receipt)) { showError('receipt', 'Letters, numbers and hyphens only'); ok = false; }
+        if (file) {
+            const ext = file.name.split('.').pop().toLowerCase();
+            if (!['pdf', 'jpg', 'jpeg', 'png'].includes(ext)) { showError('file', 'Only PDF, JPG or PNG files'); ok = false; }
+            else if (file.size > 5 * 1024 * 1024) { showError('file', 'The file must be under 5 MB'); ok = false; }
+        }
+        if (!ok) return;
+
+        const body = {
+            allocationId: Number(allocationId),
+            typeId: Number(typeId),
+            recurring: recurring,
+            frequency: recurring ? frequency : null,
+            expenseDate: date,
+            amount: amount,
+            description: description,
+            receiptNumber: receipt,
+            confirmedDuplicate: confirmedDuplicate
+        };
+
+        const button = document.getElementById('save-btn');
+        button.disabled = true;
+        try {
+            const saved = editing
+                ? await api('/expenses/' + editing.expenseId, { method: 'PUT', body: JSON.stringify(body) })
+                : await api('/expenses', { method: 'POST', body: JSON.stringify(body) });
+
+            let note = editing ? 'Expense updated.' : 'Expense saved.';
+            if (file) {
+                try {
+                    const form = new FormData();
+                    form.append('file', file);
+                    await api('/expenses/' + saved.expenseId + '/receipt', { method: 'POST', body: form });
+                } catch (err) {
+                    note += ' But the receipt file was not uploaded: ' + err.message;
+                }
+            }
+
+            confirmedDuplicate = false;
+            closeForm();
+            await loadYear();
+            showMessage('page-message', note, note.includes('not uploaded') ? 'error' : 'success');
+        } catch (err) {
+            if (err.status === 409) {
+                // Duplicate receipt: ask, and save again if it really is a different bill
+                if (confirm(err.message + '.\n\nIs this a different bill? Click OK to save it anyway.')) {
+                    confirmedDuplicate = true;
+                    button.disabled = false;
+                    return saveExpense();
+                }
+                showError('receipt', 'This receipt number is already in the system');
+            } else {
+                showError('form', err.message);
+            }
+        } finally {
+            button.disabled = false;
+        }
+    }
+
+    // ---------- Events ----------
+
+    document.getElementById('type').addEventListener('change', () => {
+        updateCategoryOptions(null);
+        refreshSuggestions();
+    });
+    document.getElementById('amount').addEventListener('input', scheduleSuggestions);
+    document.getElementById('kind').addEventListener('change', toggleFrequency);
+    document.getElementById('receipt').addEventListener('input', () => { confirmedDuplicate = false; });
+
+    init();
+</script>
+</body>
+</html>

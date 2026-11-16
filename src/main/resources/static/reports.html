@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Reports | Department Budget System</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+    <aside id="sidebar" class="sidebar"></aside>
+
+    <div class="content">
+        <div class="topbar"><span>STAFF</span><span>HOME / REPORTS</span></div>
+
+        <main class="page">
+            <div class="page-header">
+                <h1>Reports</h1>
+            </div>
+
+            <div id="page-message"></div>
+
+            <div class="tabs">
+                <button class="tab active" id="tab-period" onclick="switchTab('period')">Period report</button>
+                <button class="tab" id="tab-category" onclick="switchTab('category')">Category report</button>
+            </div>
+
+            <!-- Filters -->
+            <div class="card">
+                <p class="muted small" id="tab-help">All expenses between two dates, across every category.</p>
+                <div class="form-grid">
+                    <div class="field hidden" id="category-field">
+                        <label for="category">Category</label>
+                        <select id="category"></select>
+                        <span class="error" id="category-error"></span>
+                    </div>
+                    <div class="field">
+                        <label for="from">From</label>
+                        <input id="from" type="date">
+                        <span class="error" id="from-error"></span>
+                    </div>
+                    <div class="field">
+                        <label for="to">To</label>
+                        <input id="to" type="date">
+                        <span class="error" id="to-error"></span>
+                    </div>
+                    <div class="field">
+                        <label for="kind">Expenses</label>
+                        <select id="kind">
+                            <option value="ALL">All</option>
+                            <option value="RECURRING">Recurring only</option>
+                            <option value="NON_RECURRING">Non-recurring only</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button class="btn-primary" onclick="generate()">Show report</button>
+                    <button class="btn-secondary" onclick="download('excel')">Download Excel</button>
+                    <button class="btn-secondary" onclick="download('pdf')">Download PDF</button>
+                </div>
+            </div>
+
+            <!-- Results -->
+            <div id="results" class="hidden">
+                <div class="card">
+                    <h2 id="report-title"></h2>
+                    <div id="summary"></div>
+                    <p id="report-count" class="muted small"></p>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr><th>Date</th><th>Category</th><th>Type</th><th>Description</th>
+                                    <th>Receipt no.</th><th>Recurring</th><th class="amount">Amount</th></tr>
+                            </thead>
+                            <tbody id="report-rows"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="two-col">
+                    <div class="card">
+                        <h3>By month</h3>
+                        <table>
+                            <thead><tr><th>Month</th><th class="amount">Spent</th></tr></thead>
+                            <tbody id="month-rows"></tbody>
+                        </table>
+                    </div>
+                    <div class="card" id="by-category-card">
+                        <h3>By category</h3>
+                        <table>
+                            <thead><tr><th>Category</th><th class="amount">Spent</th></tr></thead>
+                            <tbody id="category-rows"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <footer class="footer">Department Budget Management System</footer>
+    </div>
+</div>
+
+<script src="script.js"></script>
+<script>
+    requireLogin();
+    renderSidebar('reports');
+
+    let activeTab = 'period';
+
+    async function init() {
+        // Default dates: start of this academic year to today
+        document.getElementById('from').value = currentAcademicYear().start;
+        document.getElementById('to').value = todayIso();
+        document.getElementById('from').max = todayIso();
+        document.getElementById('to').max = todayIso();
+
+        try {
+            const categories = await api('/categories');
+            document.getElementById('category').innerHTML = '<option value="">Choose category</option>' +
+                categories.map(c => `<option value="${c.categoryId}">${escapeHtml(c.code)}: ${escapeHtml(c.name)}</option>`).join('');
+        } catch (err) {
+            showMessage('page-message', err.message, 'error');
+            return;
+        }
+
+        // Opened from a dashboard card: show that category's report straight away
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('categoryId')) {
+            switchTab('category');
+            document.getElementById('category').value = params.get('categoryId');
+            if (params.get('from')) document.getElementById('from').value = params.get('from');
+            if (params.get('to')) document.getElementById('to').value = params.get('to');
+            generate();
+        }
+    }
+
+    function switchTab(tab) {
+        activeTab = tab;
+        document.getElementById('tab-period').classList.toggle('active', tab === 'period');
+        document.getElementById('tab-category').classList.toggle('active', tab === 'category');
+        document.getElementById('category-field').classList.toggle('hidden', tab !== 'category');
+        document.getElementById('tab-help').textContent = tab === 'category'
+            ? 'Expenses of one category between two dates, with its budget and month-by-month spending.'
+            : 'All expenses between two dates, across every category.';
+        document.getElementById('results').classList.add('hidden');
+        clearErrors();
+    }
+
+    // Checks the filters and returns the query text, or null if something is wrong
+    function readFilters() {
+        clearErrors();
+        clearMessage('page-message');
+        const from = document.getElementById('from').value;
+        const to = document.getElementById('to').value;
+        const kind = document.getElementById('kind').value;
+        const categoryId = document.getElementById('category').value;
+
+        let ok = true;
+        if (!from) { showError('from', 'Choose the start date'); ok = false; }
+        if (!to) { showError('to', 'Choose the end date'); ok = false; }
+        else if (isFutureDate(to)) { showError('to', 'The end date cannot be in the future'); ok = false; }
+        if (from && to && from > to) { showError('from', 'The start date must be before the end date'); ok = false; }
+        if (activeTab === 'category' && !categoryId) { showError('category', 'Choose a category'); ok = false; }
+        if (!ok) return null;
+
+        let query = `from=${from}&to=${to}&kind=${kind}`;
+        if (activeTab === 'category') query += `&categoryId=${categoryId}`;
+        return query;
+    }
+
+    async function generate() {
+        const query = readFilters();
+        if (!query) return;
+        try {
+            const data = await api(`/reports/${activeTab}?${query}`);
+            render(data);
+        } catch (err) {
+            showMessage('page-message', err.message, 'error');
+        }
+    }
+
+    function render(d) {
+        document.getElementById('results').classList.remove('hidden');
+        document.getElementById('report-title').textContent = d.title;
+        document.getElementById('report-count').textContent =
+            d.count + (d.count === 1 ? ' expense' : ' expenses') + ', total ' + formatRupees(d.total);
+
+        // Category report: the category's budget for the year
+        const summary = document.getElementById('summary');
+        if (d.summary) {
+            const s = d.summary;
+            summary.innerHTML = `
+                <div class="summary">
+                    <div class="summary-box"><div class="label">Allocated in ${escapeHtml(s.academicYear)}</div><div class="value">${formatRupees(s.amount)}</div></div>
+                    <div class="summary-box"><div class="label">Spent in the year</div><div class="value">${formatRupees(s.spent)}</div></div>
+                    <div class="summary-box"><div class="label">Remaining</div><div class="value">${formatRupees(s.remaining)}</div></div>
+                    <div class="summary-box"><div class="label">Used</div><div class="value">${s.utilisation}%</div></div>
+                </div>`;
+        } else {
+            summary.innerHTML = '';
+        }
+
+        const rows = document.getElementById('report-rows');
+        if (d.rows.length === 0) {
+            rows.innerHTML = '<tr><td colspan="7" class="muted">No expenses match these filters. Try a wider date range.</td></tr>';
+        } else {
+            rows.innerHTML = d.rows.map(e => `
+                <tr>
+                    <td class="nowrap">${formatDate(e.expenseDate)}</td>
+                    <td>${escapeHtml(e.categoryCode)}: ${escapeHtml(e.categoryName)}</td>
+                    <td>${escapeHtml(e.typeName)}</td>
+                    <td>${escapeHtml(e.description)}</td>
+                    <td class="nowrap">${escapeHtml(e.receiptNumber)}</td>
+                    <td>${e.recurring ? formatFrequency(e.frequency) : 'No'}</td>
+                    <td class="amount">${formatRupees(e.amount)}</td>
+                </tr>`).join('') +
+                `<tr class="total-row"><td colspan="6">Total</td><td class="amount">${formatRupees(d.total)}</td></tr>`;
+        }
+
+        document.getElementById('month-rows').innerHTML = d.byMonth.length === 0
+            ? '<tr><td colspan="2" class="muted">Nothing spent</td></tr>'
+            : d.byMonth.map(m => `<tr><td>${formatMonth(m.month)}</td><td class="amount">${formatRupees(m.total)}</td></tr>`).join('');
+
+        // "By category" only makes sense for the period report
+        document.getElementById('by-category-card').classList.toggle('hidden', activeTab === 'category');
+        document.getElementById('category-rows').innerHTML = d.byCategory.length === 0
+            ? '<tr><td colspan="2" class="muted">Nothing spent</td></tr>'
+            : d.byCategory.map(c => `<tr><td>${escapeHtml(c.category)}</td><td class="amount">${formatRupees(c.total)}</td></tr>`).join('');
+    }
+
+    async function download(format) {
+        const query = readFilters();
+        if (!query) return;
+        const ext = format === 'pdf' ? 'pdf' : 'xlsx';
+        const name = (activeTab === 'category' ? 'Category_Report_' : 'Period_Report_') +
+            document.getElementById('from').value + '_to_' + document.getElementById('to').value + '.' + ext;
+        try {
+            await downloadFile(`/reports/${activeTab}/export?${query}&format=${format}`, name);
+        } catch (err) {
+            showMessage('page-message', err.message, 'error');
+        }
+    }
+
+    init();
+</script>
+</body>
+</html>
