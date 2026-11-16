@@ -80,7 +80,7 @@ function renderSidebar(active) {
         ['expenses', 'Expenses'],
         ['reports', 'Reports']
     ];
-    let html = '<div class="brand"><span class="brand-mark">₹</span><span>Budget System</span></div><nav>';
+    let html = '<div class="brand"><img class="brand-mark" src="image.png" alt="PSGiTech logo"><span>PSGiTech Budget System</span></div><nav>';
     for (const [file, label] of pages) {
         const cls = file === active ? 'active' : '';
         html += `<a href="${file}.html" class="${cls}">${label}</a>`;
